@@ -1,0 +1,15 @@
+[Unit]
+Description=Paperless webserver
+After=network.target
+Wants=network.target
+Requires=redis.service
+#Requires=paperless-webserver.socket
+
+[Service]
+User=paperless
+Group=paperless
+WorkingDirectory=/opt/paperless/src
+ExecStart=python3 webserver.py
+
+[Install]
+WantedBy=multi-user.target
