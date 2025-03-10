@@ -156,7 +156,7 @@ export class ConfigComponent
   }
 
   getDocsUrl(key: string) {
-    return `https://docs.paperless-ngx.com/configuration/#${key}`
+    return `https://www.vinorsoft.com/`
   }
 
   public saveConfig() {
