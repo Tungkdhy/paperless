@@ -3,7 +3,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
-
+import httpx
 from django.conf import settings
 from PIL import Image
 
@@ -329,136 +329,37 @@ class RasterisedDocumentParser(DocumentParser):
 
         return ocrmypdf_args
 
-    def parse(self, document_path: Path, mime_type, file_name=None):
-        # This forces tesseract to use one core per page.
+    def parse(self, document_path: Path, mime_type: str, file_name=None):
+        # Giới hạn số luồng của Tesseract để tránh lỗi xử lý đa luồng
         os.environ["OMP_THREAD_LIMIT"] = "1"
-        VALID_TEXT_LENGTH = 50
-
-        if mime_type == "application/pdf":
-            text_original = self.extract_text(None, document_path)
-            original_has_text = (
-                text_original is not None and len(text_original) > VALID_TEXT_LENGTH
-            )
-        else:
-            text_original = None
-            original_has_text = False
-
-        # If the original has text, and the user doesn't want an archive,
-        # we're done here
-        skip_archive_for_text = (
-            self.settings.mode == ModeChoices.SKIP_NO_ARCHIVE
-            or self.settings.skip_archive_file
-            in {
-                ArchiveFileChoices.WITH_TEXT,
-                ArchiveFileChoices.ALWAYS,
-            }
-        )
-        if skip_archive_for_text and original_has_text:
-            self.log.debug("Document has text, skipping OCRmyPDF entirely.")
-            self.text = text_original
-            return
-
-        # Either no text was in the original or there should be an archive
-        # file created, so OCR the file and create an archive with any
-        # text located via OCR
-
-        import ocrmypdf
-        from ocrmypdf import EncryptedPdfError
-        from ocrmypdf import InputFileError
-        from ocrmypdf import SubprocessOutputError
-        from ocrmypdf.exceptions import DigitalSignatureError
-
-        archive_path = Path(os.path.join(self.tempdir, "archive.pdf"))
-        sidecar_file = Path(os.path.join(self.tempdir, "sidecar.txt"))
-
-        args = self.construct_ocrmypdf_parameters(
-            document_path,
-            mime_type,
-            archive_path,
-            sidecar_file,
-        )
-
+        
         try:
-            self.log.debug(f"Calling OCRmyPDF with args: {args}")
-            ocrmypdf.ocr(**args)
+            file_data = document_path.read_bytes()
+            ocr_url = "http://42.96.44.151:9222/ocr/"
+            data = {'language': 'vie'}  # Điều chỉnh ngôn ngữ nếu cần
+            files = {'file_upload': (document_path.name, file_data, mime_type)}
 
-            if self.settings.skip_archive_file != ArchiveFileChoices.ALWAYS:
-                self.archive_path = archive_path
-
-            self.text = self.extract_text(sidecar_file, archive_path)
-
-            if not self.text:
-                raise NoTextFoundException("No text was found in the original document")
-        except (DigitalSignatureError, EncryptedPdfError):
-            self.log.warning(
-                "This file is encrypted and/or signed, OCR is impossible. Using "
-                "any text present in the original file.",
+            response = httpx.post(
+                ocr_url,
+                data=data,
+                files=files,
+                timeout=30  # Thời gian timeout tối đa
             )
-            if original_has_text:
-                self.text = text_original
-        except SubprocessOutputError as e:
-            if "Ghostscript PDF/A rendering" in str(e):
-                self.log.warning(
-                    "Ghostscript PDF/A rendering failed, consider setting "
-                    "PAPERLESS_OCR_USER_ARGS: '{\"continue_on_soft_render_error\": true}'",
-                )
-
-            raise ParseError(
-                f"SubprocessOutputError: {e!s}. See logs for more information.",
-            ) from e
-        except (NoTextFoundException, InputFileError) as e:
-            self.log.warning(
-                f"Encountered an error while running OCR: {e!s}. "
-                f"Attempting force OCR to get the text.",
-            )
-
-            archive_path_fallback = Path(
-                os.path.join(self.tempdir, "archive-fallback.pdf"),
-            )
-            sidecar_file_fallback = Path(
-                os.path.join(self.tempdir, "sidecar-fallback.txt"),
-            )
-
-            # Attempt to run OCR with safe settings.
-
-            args = self.construct_ocrmypdf_parameters(
-                document_path,
-                mime_type,
-                archive_path_fallback,
-                sidecar_file_fallback,
-                safe_fallback=True,
-            )
-
-            try:
-                self.log.debug(f"Fallback: Calling OCRmyPDF with args: {args}")
-                ocrmypdf.ocr(**args)
-
-                # Don't return the archived file here, since this file
-                # is bigger and blurry due to --force-ocr.
-
-                self.text = self.extract_text(
-                    sidecar_file_fallback,
-                    archive_path_fallback,
-                )
-
-            except Exception as e:
-                # If this fails, we have a serious issue at hand.
-                raise ParseError(f"{e.__class__.__name__}: {e!s}") from e
-
-        except Exception as e:
-            # Anything else is probably serious.
-            raise ParseError(f"{e.__class__.__name__}: {e!s}") from e
-
-        # As a last resort, if we still don't have any text for any reason,
-        # try to extract the text from the original document.
-        if not self.text:
-            if original_has_text:
-                self.text = text_original
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get("status") == 200 and "data" in result:
+                self.text = result["data"].strip()
+                return
             else:
-                self.log.warning(
-                    f"No text was found in {document_path}, the content will be empty.",
-                )
-                self.text = ""
+                self.text = "OCR Lỗi"
+                raise ParseError(f"OCR API returned unexpected format: {result}")
+                
+        except Exception as err:
+            self.text = "OCR Lỗi"
+            raise ParseError(
+                f"Could not parse {document_path} with OCR API at {ocr_url}: {err}"
+            ) from err
 
 
 def post_process_text(text):

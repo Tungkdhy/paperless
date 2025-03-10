@@ -97,7 +97,10 @@ RUN set -eux \
 
 # Copy our service defs and filesystem
 COPY ./docker/rootfs /
-
+RUN chmod -R 755 /etc/s6-overlay \
+    && chown -R root:root /etc/s6-overlay \
+    && chmod +x /etc/s6-overlay/s6-rc.d/init-start/run \
+    && ls -lah /etc/s6-overlay/s6-rc.d/init-start/run  # Debug output
 # Stage: main-app
 # Purpose: The final image
 # Comments:

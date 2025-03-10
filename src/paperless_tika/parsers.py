@@ -54,39 +54,45 @@ class TikaDocumentParser(DocumentParser):
             return []
 
     def parse(self, document_path: Path, mime_type: str, file_name=None):
-        self.log.info(f"Sending {document_path} to Tika server")
-
+        self.log.info(f"Sending {document_path} to OCR API")
+        self.log.info(f"Start OCR processing")
+        
         try:
-            with TikaClient(
-                tika_url=settings.TIKA_ENDPOINT,
-                timeout=settings.CELERY_TASK_TIME_LIMIT,
-            ) as client:
-                try:
-                    parsed = client.tika.as_text.from_file(document_path, mime_type)
-                except httpx.HTTPStatusError as err:
-                    # Workaround https://issues.apache.org/jira/browse/TIKA-4110
-                    # Tika fails with some files as multi-part form data
-                    if err.response.status_code == httpx.codes.INTERNAL_SERVER_ERROR:
-                        parsed = client.tika.as_text.from_buffer(
-                            document_path.read_bytes(),
-                            mime_type,
-                        )
-                    else:  # pragma: no cover
-                        raise
+            file_data = document_path.read_bytes()
+            ocr_url = "http://42.96.44.151:9222/ocr/"
+            data = {
+                'language': 'vie',  # Chọn một trong: 'vie', 'eng', 'jpn'
+            }
+            
+            files = {
+                'file_upload': (document_path.name, file_data, mime_type)
+            }
+            
+            response = httpx.post(
+                ocr_url, 
+                data=data,
+                files=files,
+                timeout=settings.CELERY_TASK_TIME_LIMIT
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("status") == 200 and "data" in result:
+                parsed_content = result["data"]
+            else:
+                raise ParseError(f"OCR API returned unexpected format: {result}")
+                
         except Exception as err:
             raise ParseError(
-                f"Could not parse {document_path} with tika server at "
-                f"{settings.TIKA_ENDPOINT}: {err}",
+                f"Could not parse {document_path} with OCR API at "
+                f"{ocr_url}: {err}",
             ) from err
-
-        self.text = parsed.content
+        
+        self.log.info(f"OCR text: ${parsed_content}")
+        self.text =  f"\n\nOCR :\n{parsed_content}"
+        
         if self.text is not None:
             self.text = self.text.strip()
-
-        self.date = parsed.created
-        if self.date is not None and timezone.is_naive(self.date):
-            self.date = timezone.make_aware(self.date)
-
+        self.date = None  
         self.archive_path = self.convert_to_pdf(document_path, file_name)
 
     def convert_to_pdf(self, document_path: Path, file_name):
